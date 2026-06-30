@@ -242,8 +242,27 @@ def load_trained_model_for_inference(
         model = model.to("cuda")
     model.eval()
     model.config.use_cache = True
-    if hasattr(model.config, "attn_implementation"):
-        model.config.attn_implementation = "eager"
+
+    for candidate in [model, getattr(model, "base_model", None), getattr(model, "model", None)]:
+        if candidate is None:
+            continue
+        config = getattr(candidate, "config", None)
+        if config is not None:
+            for attr_name in ("attn_implementation", "_attn_implementation"):
+                if hasattr(config, attr_name):
+                    try:
+                        setattr(config, attr_name, "eager")
+                    except Exception:
+                        pass
+        try:
+            candidate.generation_config.attn_implementation = "eager"
+        except Exception:
+            pass
+        try:
+            candidate.generation_config._attn_implementation = "eager"
+        except Exception:
+            pass
+
     try:
         model.generation_config.cache_implementation = "static"
     except Exception:

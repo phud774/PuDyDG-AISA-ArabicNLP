@@ -208,6 +208,34 @@ def fallback_think(function_name: str) -> str:
     return f"طلب المستخدم يتطلب استخدام الدالة {function_name} مع المعاملات المستخرجة."
 
 
+def force_safe_attention(model: torch.nn.Module) -> None:
+    candidates = [model]
+    for attr_name in ("base_model", "model"):
+        attr = getattr(model, attr_name, None)
+        if attr is not None:
+            candidates.append(attr)
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        config = getattr(candidate, "config", None)
+        if config is not None:
+            for attr_name in ("attn_implementation", "_attn_implementation"):
+                if hasattr(config, attr_name):
+                    try:
+                        setattr(config, attr_name, "eager")
+                    except Exception:
+                        pass
+            try:
+                candidate.generation_config.attn_implementation = "eager"
+            except Exception:
+                pass
+            try:
+                candidate.generation_config._attn_implementation = "eager"
+            except Exception:
+                pass
+
+
 def batched_generate(
     model: torch.nn.Module,
     tokenizer: AutoTokenizer,
@@ -223,6 +251,7 @@ def batched_generate(
     tokenizer.padding_side = "left"
     outputs: list[str] = []
     model.eval()
+    force_safe_attention(model)
 
     device = next(model.parameters()).device
 
@@ -237,14 +266,25 @@ def batched_generate(
             add_special_tokens=False,
         ).to(device)
 
-        generated = model.generate(
-            **encoded,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            use_cache=True,
-        )
+        if torch.cuda.is_available():
+            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
+                generated = model.generate(
+                    **encoded,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    use_cache=True,
+                )
+        else:
+            generated = model.generate(
+                **encoded,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                use_cache=True,
+            )
 
         prompt_width = encoded["input_ids"].shape[1]
         new_tokens = generated[:, prompt_width:]

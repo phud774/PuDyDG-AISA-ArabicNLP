@@ -22,11 +22,38 @@ def _load_env_file(env_path: Path | None = None) -> dict[str, str]:
     return values
 
 
+def _load_kaggle_secret(secret_name: str) -> str:
+    try:
+        from kaggle_secrets import UserSecretsClient
+    except Exception:
+        return ""
+
+    try:
+        return UserSecretsClient().get_secret(secret_name) or ""
+    except Exception:
+        return ""
+
+
+def _pick_config_value(env_values: dict[str, str], *candidate_names: str) -> str:
+    for name in candidate_names:
+        value = env_values.get(name, "")
+        if value:
+            return value
+
+    for name in candidate_names:
+        value = _load_kaggle_secret(name)
+        if value:
+            return value
+
+    return ""
+
+
 def get_openai_config() -> dict[str, str]:
     env_values = {**os.environ, **_load_env_file()}
-    api_key = env_values.get("OPENAI_API_KEY") or env_values.get("OPENAI_KEY") or ""
-    base_url = env_values.get("LLM_BASE_URL") or env_values.get("OPENAI_BASE_URL") or ""
-    return {"api_key": api_key, "base_url": base_url}
+    api_key = _pick_config_value(env_values, "OPENAI_API_KEY", "OPENAI_KEY", "KAGGLE_OPENAI_API_KEY", "KAGGLE_OPENAI_KEY")
+    base_url = _pick_config_value(env_values, "LLM_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE", "KAGGLE_OPENAI_BASE_URL")
+    model_name = _pick_config_value(env_values, "OPENAI_MODEL", "KAGGLE_OPENAI_MODEL")
+    return {"api_key": api_key, "base_url": base_url, "model_name": model_name}
 
 
 def build_arguments_api_prompt(
@@ -71,10 +98,10 @@ def generate_arguments_with_openai_api(
     config = get_openai_config()
     api_key = config.get("api_key", "")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
+        raise RuntimeError("OPENAI_API_KEY is not configured. Set it in the environment or Kaggle Secrets.")
 
     client = OpenAI(api_key=api_key, base_url=config.get("base_url") or None)
-    request_model = model_name or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+    request_model = model_name or config.get("model_name") or "gpt-4o-mini"
 
     response = client.chat.completions.create(
         model=request_model,
