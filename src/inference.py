@@ -5,11 +5,17 @@ from typing import Any
 import torch
 from transformers import AutoTokenizer
 
-from src.dataset import candidate_function_names, split_prompt_target
+from src.dataset import candidate_function_names
 from src.openai_api import generate_arguments_with_openai_api, retrieve_fewshot_examples
 from src.postprocess import parse_direct_output, parse_function_name, parse_json_object, sanitize_arguments
 from src.retrieval_db import build_retrieval_database, load_retrieval_database
-from src.utils import batched_generate, build_arguments_prompt, build_function_name_prompt, fallback_think
+from src.utils import (
+    batched_generate,
+    build_arguments_prompt,
+    build_function_name_prompt,
+    fallback_think,
+    split_prompt_target,
+)
 
 
 def run_decomposed_inference(
