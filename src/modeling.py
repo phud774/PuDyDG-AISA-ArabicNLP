@@ -180,11 +180,11 @@ def load_trained_model_for_inference(
 
     if (checkpoint_dir / "adapter_config.json").exists():
         tokenizer_source = checkpoint_dir if (checkpoint_dir / "tokenizer_config.json").exists() else args.model_id
-        tokenizer = load_tokenizer(str(tokenizer_source))
+        tokenizer = load_tokenizer(str(tokenizer_source), fallback_model_id=args.model_id)
         base_model = load_base_model(args.model_id, dtype=dtype)
         model = PeftModel.from_pretrained(base_model, checkpoint_dir)
     else:
-        tokenizer = load_tokenizer(str(checkpoint_dir))
+        tokenizer = load_tokenizer(str(checkpoint_dir), fallback_model_id=args.model_id)
         model = AutoModelForCausalLM.from_pretrained(
             checkpoint_dir,
             torch_dtype=dtype,

@@ -142,12 +142,26 @@ def ensure_end_turn(target: str) -> str:
     return target
 
 
-def load_tokenizer(model_or_checkpoint: str) -> AutoTokenizer:
-    tokenizer = AutoTokenizer.from_pretrained(model_or_checkpoint)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
-    return tokenizer
+def load_tokenizer(model_or_checkpoint: str, fallback_model_id: str | None = None) -> AutoTokenizer:
+    candidates = [model_or_checkpoint]
+    if fallback_model_id and fallback_model_id != model_or_checkpoint:
+        candidates.append(fallback_model_id)
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        for use_fast in (True, False):
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(candidate, use_fast=use_fast)
+                if tokenizer.pad_token_id is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                tokenizer.padding_side = "right"
+                return tokenizer
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                last_error = exc
+
+    raise RuntimeError(
+        "Failed to load tokenizer. Install sentencepiece and ensure the tokenizer/model files are available."
+    ) from last_error
 
 
 def granular_instructions(
