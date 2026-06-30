@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.dataset import extract_gold, split_prompt_target
+from src.dataset import extract_gold
+from src.utils import split_prompt_target
 
 
 def build_retrieval_database(
