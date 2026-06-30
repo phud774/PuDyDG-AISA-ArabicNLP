@@ -252,6 +252,14 @@ def batched_generate(
     outputs: list[str] = []
     model.eval()
     force_safe_attention(model)
+    try:
+        model.config.use_cache = False
+    except Exception:
+        pass
+    try:
+        model.generation_config.use_cache = False
+    except Exception:
+        pass
 
     device = next(model.parameters()).device
 
@@ -274,7 +282,7 @@ def batched_generate(
                     do_sample=False,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
-                    use_cache=True,
+                    use_cache=False,
                 )
         else:
             generated = model.generate(
@@ -283,7 +291,7 @@ def batched_generate(
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
-                use_cache=True,
+                use_cache=False,
             )
 
         prompt_width = encoded["input_ids"].shape[1]

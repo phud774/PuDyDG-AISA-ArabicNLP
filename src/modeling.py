@@ -241,7 +241,11 @@ def load_trained_model_for_inference(
     if torch.cuda.is_available():
         model = model.to("cuda")
     model.eval()
-    model.config.use_cache = True
+    model.config.use_cache = False
+    try:
+        model.generation_config.use_cache = False
+    except Exception:
+        pass
 
     for candidate in [model, getattr(model, "base_model", None), getattr(model, "model", None)]:
         if candidate is None:
