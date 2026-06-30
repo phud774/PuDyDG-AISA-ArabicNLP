@@ -6,7 +6,9 @@ import torch
 from transformers import AutoTokenizer
 
 from src.dataset import candidate_function_names, split_prompt_target
+from src.openai_api import generate_arguments_with_openai_api, retrieve_fewshot_examples
 from src.postprocess import parse_direct_output, parse_function_name, parse_json_object, sanitize_arguments
+from src.retrieval_db import build_retrieval_database, load_retrieval_database
 from src.utils import batched_generate, build_arguments_prompt, build_function_name_prompt, fallback_think
 
 
@@ -15,8 +17,25 @@ def run_decomposed_inference(
     model: torch.nn.Module,
     tokenizer: AutoTokenizer,
     dev_ds: Any,
+    train_ds: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows = [dev_ds[i] for i in range(len(dev_ds))]
+
+    retrieval_rows: list[dict[str, Any]] = []
+    if train_ds is not None:
+        if args.build_retrieval_db:
+            build_retrieval_database(train_ds, args.retrieval_db_path, overwrite=True)
+        retrieval_rows = load_retrieval_database(args.retrieval_db_path)
+        if not retrieval_rows and train_ds is not None:
+            retrieval_rows = [
+                {
+                    "text": row.get("text", ""),
+                    "prompt": split_prompt_target(row["text"])[0],
+                    "function_name": row.get("tool_called") or "none",
+                    "arguments": {},
+                }
+                for row in train_ds
+            ]
 
     direct_prompts = [split_prompt_target(row["text"])[0] for row in rows]
     direct_raw = batched_generate(
@@ -56,24 +75,46 @@ def run_decomposed_inference(
         index for index, function_name in enumerate(predicted_names)
         if function_name != "none"
     ]
-    argument_prompts = [
-        build_arguments_prompt(rows[index], predicted_names[index])
-        for index in positive_indices
-    ]
-    argument_raw_positive = batched_generate(
-        model=model,
-        tokenizer=tokenizer,
-        prompts=argument_prompts,
-        batch_size=args.inference_batch_size,
-        max_new_tokens=args.max_new_tokens_args,
-        max_prompt_length=args.max_length,
-        description="Argument stage",
-    )
+    argument_raw_by_index: dict[int, str] = {}
 
-    argument_raw_by_index: dict[int, str] = {
-        index: raw
-        for index, raw in zip(positive_indices, argument_raw_positive)
-    }
+    if args.use_openai_args:
+        for index in positive_indices:
+            row = rows[index]
+            function_name = predicted_names[index]
+            current_prompt, _ = split_prompt_target(row["text"])
+            fewshot_examples = retrieve_fewshot_examples(
+                row=row,
+                retrieval_rows=retrieval_rows,
+                function_name=function_name,
+                k=args.openai_args_fewshot_k,
+            )
+            raw = generate_arguments_with_openai_api(
+                prompt=current_prompt,
+                function_name=function_name,
+                fewshot_examples=fewshot_examples,
+                model_name=args.openai_args_model,
+                max_tokens=args.openai_args_max_tokens,
+            )
+            argument_raw_by_index[index] = raw
+    else:
+        argument_prompts = [
+            build_arguments_prompt(rows[index], predicted_names[index])
+            for index in positive_indices
+        ]
+        argument_raw_positive = batched_generate(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=argument_prompts,
+            batch_size=args.inference_batch_size,
+            max_new_tokens=args.max_new_tokens_args,
+            max_prompt_length=args.max_length,
+            description="Argument stage",
+        )
+
+        argument_raw_by_index = {
+            index: raw
+            for index, raw in zip(positive_indices, argument_raw_positive)
+        }
 
     predictions: list[dict[str, Any]] = []
     debug_rows: list[dict[str, Any]] = []

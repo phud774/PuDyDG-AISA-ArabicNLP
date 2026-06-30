@@ -33,6 +33,7 @@ def main() -> None:
             model=model,
             tokenizer=tokenizer,
             dev_ds=ds["dev"],
+            train_ds=ds.get("train"),
         )
 
         submission_path = output_dir / "aisa_dev_submission.jsonl"

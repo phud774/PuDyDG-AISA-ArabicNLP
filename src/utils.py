@@ -73,6 +73,40 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Also save a merged full model after training.",
     )
+    parser.add_argument(
+        "--use_openai_args",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use OpenAI API for argument generation instead of the local model.",
+    )
+    parser.add_argument(
+        "--openai_args_model",
+        default=None,
+        help="Model name for OpenAI argument extraction.",
+    )
+    parser.add_argument(
+        "--openai_args_max_tokens",
+        type=int,
+        default=256,
+        help="Max output tokens for OpenAI argument generation.",
+    )
+    parser.add_argument(
+        "--openai_args_fewshot_k",
+        type=int,
+        default=3,
+        help="Number of few-shot examples to retrieve for OpenAI argument generation.",
+    )
+    parser.add_argument(
+        "--retrieval_db_path",
+        default="outputs/aisa_decomposed/retrieval_db.jsonl",
+        help="Path to the persisted retrieval database built from the train split.",
+    )
+    parser.add_argument(
+        "--build_retrieval_db",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Build or rebuild the retrieval database from the train split before inference.",
+    )
     return parser.parse_args()
 
 

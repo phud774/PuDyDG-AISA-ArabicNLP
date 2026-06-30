@@ -1,0 +1,5 @@
+Thêm 1 option để tạo arguments JSON = call API (các bước khác vẫn như cũ)
+Sử dụng OPENAI API với key và llm_base_url lấy từ file .env
+Áp dụng kĩ thuật fewshot với các shot được retrieve từ các input cùng loại function call và giống với input hiện tại
+
+thử truyền thêm format cho function
