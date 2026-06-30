@@ -9,7 +9,7 @@ from typing import Any
 from datasets import Dataset, DatasetDict, load_dataset
 
 from src.constants import DEFAULT_DATASET_ID
-from src.utils import MODEL_MARKER
+from src.utils import MODEL_MARKER, split_prompt_target
 
 
 def load_aisa_dataset(args: Any) -> DatasetDict:
