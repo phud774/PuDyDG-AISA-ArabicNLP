@@ -172,23 +172,70 @@ def train_model(
     return trainer.model, tokenizer
 
 
+def _resolve_checkpoint_dir(checkpoint_dir: str | Path | None) -> Path:
+    raw_path = Path(str(checkpoint_dir or ""))
+    candidates: list[Path] = []
+
+    if raw_path.exists():
+        candidates.append(raw_path)
+
+    if raw_path.name:
+        candidates.append(Path.cwd() / raw_path.name)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates.extend(
+        [
+            repo_root / "aisa_decomposed",
+            Path.cwd() / "aisa_decomposed",
+            Path("/kaggle/working/aisa_decomposed"),
+            Path("/kaggle/working/PP2.AGENTIC/aisa_decomposed"),
+        ]
+    )
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            return resolved
+
+    return raw_path.resolve(strict=False)
+
+
 def load_trained_model_for_inference(
     args: Any,
 ) -> tuple[torch.nn.Module, object]:
-    checkpoint_dir = Path(args.checkpoint_dir or args.output_dir)
+    checkpoint_dir = _resolve_checkpoint_dir(args.checkpoint_dir or args.output_dir)
     dtype = choose_dtype()
 
-    if (checkpoint_dir / "adapter_config.json").exists():
+    if not checkpoint_dir.exists():
+        raise FileNotFoundError(
+            f"Checkpoint directory not found: {checkpoint_dir}. "
+            "Use a valid local path such as /kaggle/working/aisa_decomposed or a local folder that contains adapter_config.json or config.json."
+        )
+
+    adapter_config = checkpoint_dir / "adapter_config.json"
+    adapter_model = checkpoint_dir / "adapter_model.safetensors"
+    config_json = checkpoint_dir / "config.json"
+
+    if adapter_config.exists() or adapter_model.exists():
         tokenizer_source = checkpoint_dir if (checkpoint_dir / "tokenizer_config.json").exists() else args.model_id
         tokenizer = load_tokenizer(str(tokenizer_source), fallback_model_id=args.model_id)
         base_model = load_base_model(args.model_id, dtype=dtype)
         model = PeftModel.from_pretrained(base_model, checkpoint_dir)
-    else:
+    elif config_json.exists():
         tokenizer = load_tokenizer(str(checkpoint_dir), fallback_model_id=args.model_id)
         model = AutoModelForCausalLM.from_pretrained(
             checkpoint_dir,
             torch_dtype=dtype,
             low_cpu_mem_usage=True,
+        )
+    else:
+        raise FileNotFoundError(
+            f"Checkpoint directory '{checkpoint_dir}' does not contain a supported model layout. "
+            "Expected adapter_config.json/adapter_model.safetensors for PEFT checkpoints or config.json for a full model checkpoint."
         )
 
     if torch.cuda.is_available():
