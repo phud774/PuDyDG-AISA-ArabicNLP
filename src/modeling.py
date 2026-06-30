@@ -242,4 +242,10 @@ def load_trained_model_for_inference(
         model = model.to("cuda")
     model.eval()
     model.config.use_cache = True
+    if hasattr(model.config, "attn_implementation"):
+        model.config.attn_implementation = "eager"
+    try:
+        model.generation_config.cache_implementation = "static"
+    except Exception:
+        pass
     return model, tokenizer
