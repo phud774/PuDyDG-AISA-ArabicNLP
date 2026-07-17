@@ -1,0 +1,4 @@
+# Dependencies required by augment_aisa_arguments.py.
+# It imports the AISA data/schema helpers, so retain the base AISA stack.
+-r requirements_aisa.txt
+openai>=1.0.0
