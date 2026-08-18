@@ -1,3 +1,0 @@
-PROMPT
-
-English instructions thường giúp instruction-following, reasoning và output constraints; target-language instructions có thể tốt hơn cho các tác vụ phụ thuộc mạnh vào từ vựng và nhãn ngôn ngữ đích. Vì vậy, ngôn ngữ system prompt nên được xem là một hyperparameter và đánh giá bằng ablation trên chính benchmark mục tiêu.

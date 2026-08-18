@@ -1,0 +1,80 @@
+{
+  "base_model": "TuwaiqAcademy/AISA-AR-FunctionCall-Think",
+  "dataset": "TuwaiqAcademy/AISA-ArabicFC",
+  "dataset_revision": "main",
+  "training_splits": [
+    "train"
+  ],
+  "evaluation_split": "dev",
+  "training_source_rows": 10550,
+  "evaluation_source_rows": 545,
+  "task_repeats": {
+    "full_track_b": 2,
+    "arguments": 2,
+    "function_name": 1,
+    "tool_decision": 1,
+    "call_only": 1
+  },
+  "negative_repeat": 20,
+  "max_length": 2048,
+  "num_train_epochs": 1.0,
+  "learning_rate": 0.0001,
+  "lora_r": 64,
+  "lora_alpha": 128,
+  "lora_dropout": 0.05,
+  "seed": 42,
+  "augmentation_jsonl": [
+    "aisa_function_fewshot_augmentations.jsonl"
+  ],
+  "max_samples_augmentation": [
+    500
+  ],
+  "argument_augmentation_rows": 500,
+  "argument_policy": "aisa_v1.4_official_only",
+  "argument_policy_sources": [
+    "AISA-ArabicFC v1.4 dataset card",
+    "released tool schemas",
+    "official normalize.py OPTIONAL_IGNORE"
+  ],
+  "world_size": 1,
+  "effective_global_batch_size": 48,
+  "ddp_backend": null,
+  "unscored_arguments_by_tool": {
+    "translate_text": [
+      "source_language"
+    ],
+    "check_traffic_violations": [
+      "plate_number"
+    ],
+    "get_qibla_direction": [
+      "latitude",
+      "longitude"
+    ],
+    "get_weather": [
+      "country"
+    ],
+    "calculate_end_of_service": [
+      "country"
+    ],
+    "calculate_zakat": [
+      "weight_unit"
+    ],
+    "check_iqama_status": [
+      "border_number"
+    ],
+    "order_food": [
+      "delivery_address"
+    ],
+    "search_hotels": [
+      "stars"
+    ],
+    "search_quran": [
+      "search_type",
+      "surah_number"
+    ],
+    "search_umrah_packages": [
+      "duration_days",
+      "hotel_rating"
+    ]
+  }
+}

@@ -1,13 +1,15 @@
-# Local secrets and Python environments
+# Secrets and local environments
 .env
+.env.*
+!.env.example
 .venv*/
 
 # Python-generated files
 __pycache__/
 *.py[cod]
 
-# Generated datasets, predictions, and training runs
-*.jsonl
-outputs/
-aisa_decomposed/checkpoint-*/
-aisa_decomposed/*_metrics.json
+# Local/generated duplicates and intermediate checkpoints
+generated/
+*.zip
+outputs/aisa_decomposed/checkpoint-*/
+

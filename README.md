@@ -1,94 +1,96 @@
-# Arabic NLP Pipeline
+# AISA Arabic Function-Calling Reproduction Package
 
-Project này triển khai pipeline phân tích yêu cầu người dùng theo kiểu decomposed multi-task cho dữ liệu AISA, hỗ trợ:
+This repository contains the model artifacts, source code, and outputs needed to reproduce the submitted AISA Arabic function-calling system.
 
-- huấn luyện mô hình bằng LoRA trên model causal LM
-- chạy inference cho nhiệm vụ phát hiện hàm/tool, tên hàm và arguments
-- có thể dùng OpenAI-compatible API cho bước argument extraction
+- Complete archive mirror: https://drive.google.com/drive/folders/1DPyOBhHvxUed3n8ObE4Q2PaIaioxY2uL?usp=sharing
+- Base model: https://huggingface.co/TuwaiqAcademy/AISA-AR-FunctionCall-Think
 
-## 1. Yêu cầu hệ thống
+## Repository contents
 
-- Python 3.10+
-- CUDA-compatible GPU để training
-- Git
+- `aisa_decomposed_multitask_toolinfo.py`: training and inference entry point.
+- `augment_aisa_by_function.py` and `augment_aisa_arguments.py`: optional augmentation generator and helper.
+- `aisa_function_fewshot_augmentations.jsonl`: exact augmentation data used in the reported training run.
+- `outputs/aisa_decomposed`: final adapter, tokenizer, configuration, original predictions, debug files, and metrics from the initial run.
+- `reproduced`: verification outputs produced on RTX 4090, RTX 3090, and RTX PRO 5000 GPUs.
 
-## 2. Cài đặt môi trường
+Intermediate optimizer checkpoints are intentionally omitted because they are not needed for inference or reproduction of the submitted predictions.
+
+## Inference
+
+Create an environment and install the dependencies:
 
 ```bash
-cd c:\coding_space\paper\PP2.ArabicNLP2026
-python -m venv .venv
-.venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements_aisa.txt
 ```
 
-Nếu đang dùng Windows PowerShell, có thể dùng:
-
-```powershell
-cd c:\coding_space\paper\PP2.ArabicNLP2026
-.\.venv\Scripts\Activate.ps1
-```
-
-## 3. Cấu hình biến môi trường
-
-Tạo file `.env` ở thư mục gốc với nội dung như sau:
-
-```env
-OPENAI_API_KEY=your_api_key
-LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
-OPENAI_MODEL=your_model_name
-```
-
-Nếu không dùng OpenAI cho bước argument extraction, bạn có thể bỏ qua các biến này và chạy local model.
-
-## 4. Huấn luyện mô hình
-
-Ví dụ huấn luyện trên model gốc:
+For exact reproduction of the submitted files, we recommend an NVIDIA RTX PRO 5000 GPU:
 
 ```bash
-python -m src.main --mode train --model_id <model_id> --dataset_id <dataset_id> --output_dir outputs/aisa_decomposed
+python3 aisa_decomposed_multitask_toolinfo.py \
+  --mode infer \
+  --checkpoint_dir outputs/aisa_decomposed \
+  --output_dir reproduced/aisa_decomposed
 ```
 
-Ví dụ với một model cụ thể:
+The final test prediction is written to `reproduced/aisa_decomposed/aisa_test_submission.jsonl`. The same directory also contains development predictions, debug-generation files, and available evaluation metrics.
+
+## Training and inference from scratch
 
 ```bash
-python -m src.main --mode train --model_id google/gemma-2-2b-it --dataset_id aisa/aisa --output_dir outputs/aisa_decomposed
+python3 aisa_decomposed_multitask_toolinfo.py \
+  --mode all \
+  --output_dir outputs/aisa_decomposed \
+  --num_train_epochs 1 \
+  --per_device_train_batch_size 6 \
+  --gradient_accumulation_steps 8
 ```
 
-Một số tham số quan trọng:
+The supplied `aisa_function_fewshot_augmentations.jsonl` file is used by default during training.
 
-- `--num_train_epochs`
-- `--learning_rate`
-- `--per_device_train_batch_size`
-- `--gradient_accumulation_steps`
-- `--max_length`
-- `--negative_repeat`
+## Optional: regenerate the augmentation file
 
-> Training yêu cầu GPU vì code dùng CUDA và PEFT/LoRA.
-
-## 5. Chạy inference
-
-Sau khi đã có checkpoint hoặc sau khi train xong:
+Use a separate environment:
 
 ```bash
-python -m src.main --mode infer --model_id <base_model_id> --checkpoint_dir outputs/aisa_decomposed --output_dir outputs/aisa_decomposed
+python3 -m venv .venv-augmentation
+source .venv-augmentation/bin/activate
+pip install -r requirements_augmentation.txt
 ```
 
-Nếu muốn chạy cả train + infer:
+Create a local `.env` file (never commit it) containing:
+
+```dotenv
+OPENAI_API_KEY=YOUR_API_KEY
+LLM_BASE_URL=YOUR_OPENAI_COMPATIBLE_BASE_URL
+OPENAI_MODEL=Llama-3.3-70B-Instruct
+```
+
+Then run:
 
 ```bash
-python -m src.main --mode all --model_id <base_model_id> --dataset_id <dataset_id> --output_dir outputs/aisa_decomposed
+python3 augment_aisa_by_function.py \
+  --output generated/aisa_function_fewshot_augmentations.jsonl \
+  --num-samples 1500
 ```
 
-## 6. Kết quả đầu ra
+Regeneration is stochastic and is not expected to reproduce the supplied augmentation file exactly. The current sanitizer may also reject more candidates than the earlier version used to generate the supplied file.
 
-Sau khi chạy, thư mục `outputs/aisa_decomposed` sẽ chứa:
+## Data declaration
 
-- `aisa_dev_submission.jsonl`
-- `aisa_dev_debug.jsonl`
-- `decomposed_training_config.json` (nếu train)
+The model was trained on the official AISA-ArabicFC training split together with 500 synthetic argument-extraction examples generated only from official training examples and released tool schemas. Test examples, test gold labels, and external datasets containing test items were not used for training.
 
-## 7. Ghi chú quan trọng
+## Reproducibility notes
 
-- File `.env` nên được đặt ở thư mục gốc của project.
-- Nếu gặp lỗi về dataset hoặc schema, hãy kiểm tra `args.dataset_id` và `args.dataset_revision`.
-- Nếu chỉ muốn chạy inference trên checkpoint đã có sẵn, dùng `--mode infer` và truyền `--checkpoint_dir`.
+The training seed was fixed at 42, but deterministic PyTorch/CUDA algorithms and deterministic GPU kernel settings were not enforced. Retraining is therefore not expected to reproduce the original weights or predictions exactly.
+
+The original training and inference run was performed on a temporary Vast.ai GPU instance, with predictions generated immediately after training in the same `--mode all` process. The instance was later destroyed, so its exact container image, CUDA driver, and package state are unavailable.
+
+Inference on an NVIDIA RTX PRO 5000 reproduced every original prediction, metric, and debug file byte-for-byte. The original and reproduced test submissions have SHA-256:
+
+```text
+be09bdcad2db5932435127c3f837f1982e9661dbd59b24fd8d5982ba4d0c8562
+```
+
+The RTX 4090 runs are mutually byte-identical but differ slightly from the original output, illustrating that greedy BF16 generation can vary across GPU architectures or CUDA kernel paths.

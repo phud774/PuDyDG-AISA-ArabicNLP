@@ -2,7 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-Decomposed multi-task fine-tuning + dev inference for AISA-ArabicFC.
+Decomposed multi-task fine-tuning for AISA-ArabicFC.
+
+Data flow:
+    - fine-tune only on the train split;
+    - measure validation loss and official task metrics on the dev split;
+    - generate the final JSONL submission on the test split.
 
 Main idea:
     Reuse every original training row in several explicitly instructed tasks:
@@ -75,6 +80,53 @@ END_TURN = "<end_of_turn>"
 DEFAULT_MODEL_ID = "TuwaiqAcademy/AISA-AR-FunctionCall-Think"
 DEFAULT_DATASET_ID = "TuwaiqAcademy/AISA-ArabicFC"
 OFFICIAL_EVAL_REPO = "TuwaiqAcademy/AISA-ArabicFC-SharedTask-Leaderboard"
+DEFAULT_AUGMENTATION_JSONLS = [
+    "aisa_function_fewshot_augmentations.jsonl",
+    # "aisa_argument_augmentations_only_ver2.jsonl",
+]
+DEFAULT_MAX_SAMPLES_AUGMENTATION = [500]
+
+# The released v1.4 rows still contain this legacy developer instruction even
+# though the current annotation policy says not to invent/default arguments.
+LEGACY_WEATHER_DEFAULT_INSTRUCTION = (
+    "إذا كان سؤال الطقس بلا يوم محدد فاعتبره اليوم (days=1)."
+)
+FIXED_BASE_ARGUMENT_POLICY = (
+    "قاعدة استخراج المعاملات: استخرج فقط ما ذكره المستخدم صراحة أو ما يمكن "
+    "اشتقاقه مباشرة بلا تخمين. إذا غابت قيمة فاحذف مفتاحها كلياً؛ لا تخرج null "
+    "أو نصاً فارغاً أو قيمة افتراضية. لا تضف المعرّفات مثل IBAN أو رقم التأمين "
+    "أو التأشيرة أو الهوية إلا إذا قدمها المستخدم نفسه."
+)
+
+# These parameters are removed from both sides by the official evaluator. Do not
+# spend model capacity learning them, and never let them create noisy extra keys.
+UNSCORED_ARGUMENTS_BY_TOOL: dict[str, set[str]] = {
+    "translate_text": {"source_language"},
+    "check_traffic_violations": {"plate_number"},
+    "get_qibla_direction": {"latitude", "longitude"},
+    "get_weather": {"country"},
+    "calculate_end_of_service": {"country"},
+    "calculate_zakat": {"weight_unit"},
+    "check_iqama_status": {"border_number"},
+    "order_food": {"delivery_address"},
+    "search_hotels": {"stars"},
+    "search_quran": {"surah_number", "search_type"},
+    "search_umrah_packages": {"duration_days", "hotel_rating"},
+}
+
+# Tool-specific policies stated explicitly in the v1.4 dataset card. Do not add
+# heuristics inferred from dev examples or submission errors here.
+TOOL_ARGUMENT_RULES: dict[str, tuple[str, ...]] = {
+    "translate_text": (
+        "ضع في text النص الفعلي المراد ترجمته كما ورد في طلب المستخدم.",
+    ),
+    "calculate_customs": (
+        "لا تضف destination_country إلا إذا ذكر المستخدم دولة الوجهة صراحة؛ لا توجد دولة افتراضية.",
+    ),
+    "calculate_end_of_service": (
+        "لا تضف termination_type إلا إذا ذكر طلب المستخدم سبب انتهاء العلاقة صراحة.",
+    ),
+}
 
 # The full task is repeated because it is the behavior required at final inference.
 # Arguments are repeated because ArgEM is the main bottleneck/most heavily weighted metric.
@@ -123,19 +175,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--augmentation_jsonl",
         "--augmentation-jsonl",
+        "--augmentation_jsonls",
+        "--augmentation-jsonls",
         dest="augmentation_jsonl",
-        default=None,
-        help="Optional JSONL created by augment_aisa_arguments.py. Its augmentation "
-             "rows are added only to the arguments training stage.",
+        nargs="+",
+        default=DEFAULT_AUGMENTATION_JSONLS,
+        metavar="PATH",
+        help="One or more augmentation JSONL files. Rows from every file are added "
+             "only to the arguments training stage.",
     )
     parser.add_argument(
         "--max_samples_augmentation",
         "--max-samples-augmentation",
+        "--max_samples_augmentations",
+        "--max-samples-augmentations",
         dest="max_samples_augmentation",
         type=int,
-        default=None,
-        help="Maximum number of randomly selected augmentation rows. "
-             "By default, all valid augmentation rows are used.",
+        nargs="+",
+        default=DEFAULT_MAX_SAMPLES_AUGMENTATION,
+        metavar="N",
+        help="Maximum randomly selected rows for each augmentation file, in the "
+             "same order. The number of values must match the number of files.",
     )
 
     parser.add_argument(
@@ -157,6 +217,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save_steps", type=int, default=500)
     parser.add_argument("--save_total_limit", type=int, default=2)
     parser.add_argument("--dataloader_num_workers", type=int, default=2)
+    parser.add_argument(
+        "--local_rank",
+        "--local-rank",
+        type=int,
+        default=int(os.environ.get("LOCAL_RANK", "-1")),
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--ddp_backend",
+        "--ddp-backend",
+        choices=["nccl", "gloo"],
+        default=None,
+        help="torchrun backend; defaults to NCCL when available.",
+    )
     parser.add_argument("--lora_r", type=int, default=64)
     parser.add_argument("--lora_alpha", type=int, default=128)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
@@ -171,7 +245,7 @@ def parse_args() -> argparse.Namespace:
         "--force_redownload",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Re-download the dataset so an old pre-v1.2 cache is not reused.",
+        help="Re-download the dataset so the newly released test split is available.",
     )
 
     parser.add_argument("--inference_batch_size", type=int, default=8)
@@ -201,18 +275,86 @@ def choose_dtype() -> torch.dtype:
     return torch.float16
 
 
+def distributed_world_size() -> int:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
+    return int(os.environ.get("WORLD_SIZE", "1"))
+
+
+def distributed_rank() -> int:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return int(os.environ.get("RANK", "0"))
+
+
+def is_distributed() -> bool:
+    return distributed_world_size() > 1
+
+
+def is_main_process() -> bool:
+    return distributed_rank() == 0
+
+
+def distributed_barrier() -> None:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+
+def setup_distributed(args: argparse.Namespace) -> None:
+    if int(os.environ.get("WORLD_SIZE", "1")) <= 1:
+        return
+    if not torch.cuda.is_available():
+        raise RuntimeError("Multi-GPU training requires CUDA.")
+
+    local_rank = int(os.environ.get("LOCAL_RANK", str(args.local_rank)))
+    if local_rank < 0 or local_rank >= torch.cuda.device_count():
+        raise RuntimeError(
+            f"Invalid LOCAL_RANK={local_rank}; visible GPUs={torch.cuda.device_count()}."
+        )
+    torch.cuda.set_device(local_rank)
+    args.local_rank = local_rank
+
+    if not torch.distributed.is_initialized():
+        backend = args.ddp_backend
+        if backend is None:
+            backend = "nccl" if torch.distributed.is_nccl_available() else "gloo"
+        torch.distributed.init_process_group(backend=backend, init_method="env://")
+
+    if is_main_process():
+        print(
+            f"Distributed training: world_size={distributed_world_size()}, "
+            f"backend={torch.distributed.get_backend()}"
+        )
+
+
+def shutdown_distributed() -> None:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
+
 def load_aisa_dataset(args: argparse.Namespace) -> DatasetDict:
-    download_mode = "force_redownload" if args.force_redownload else "reuse_dataset_if_exists"
-    ds = load_dataset(
-        args.dataset_id,
-        revision=args.dataset_revision,
-        download_mode=download_mode,
-    )
-    required_splits = {"train", "dev"}
+    def load(force_redownload: bool) -> DatasetDict:
+        mode = "force_redownload" if force_redownload else "reuse_dataset_if_exists"
+        return load_dataset(
+            args.dataset_id,
+            revision=args.dataset_revision,
+            download_mode=mode,
+        )
+
+    if is_distributed():
+        if is_main_process():
+            ds = load(args.force_redownload)
+        distributed_barrier()
+        if not is_main_process():
+            ds = load(False)
+        distributed_barrier()
+    else:
+        ds = load(args.force_redownload)
+    required_splits = {"train", "dev", "test"}
     missing = required_splits.difference(ds.keys())
     if missing:
         raise ValueError(
-            f"Dataset must contain train and dev splits; missing: {sorted(missing)}. "
+            f"Dataset must contain train, dev, and test splits; missing: {sorted(missing)}. "
             f"Available: {list(ds.keys())}"
         )
 
@@ -252,76 +394,141 @@ def load_aisa_dataset(args: argparse.Namespace) -> DatasetDict:
 
 def load_argument_augmentations(
     train_ds: Dataset,
-    augmentation_jsonl: str | None,
-    max_samples_augmentation: int | None,
+    augmentation_jsonl: list[str] | None,
+    max_samples_augmentation: list[int] | None,
     seed: int,
-) -> Dataset | None:
-    """Append valid `aug_*` rows while retaining the original AISA feature schema.
+) -> list[dict[str, Any]] | None:
+    """Load valid augmentation rows for the argument-only training stage.
 
     These rows deliberately train only the argument extractor: their user text and
     arguments were rewritten, but their original think trace is not regenerated.
+
+    Keep them as Python records instead of forcing them through the released AISA
+    Arrow schema. That schema omits valid argument names such as ``plate_number``;
+    casting to it would either fail or silently discard the augmented gold label.
     """
     if not augmentation_jsonl:
         return None
-    if max_samples_augmentation is not None and max_samples_augmentation <= 0:
-        raise ValueError("--max_samples_augmentation must be greater than 0.")
 
-    path = Path(augmentation_jsonl)
-    if not path.is_file():
-        raise FileNotFoundError(f"Augmentation JSONL was not found: {path}")
+    if max_samples_augmentation is None:
+        limits: list[int | None] = [None] * len(augmentation_jsonl)
+    else:
+        if len(max_samples_augmentation) != len(augmentation_jsonl):
+            raise ValueError(
+                "--max_samples_augmentation must provide exactly one value per "
+                f"--augmentation_jsonl file (got {len(max_samples_augmentation)} "
+                f"limits for {len(augmentation_jsonl)} files)."
+            )
+        if any(limit <= 0 for limit in max_samples_augmentation):
+            raise ValueError(
+                "Every --max_samples_augmentation value must be greater than 0."
+            )
+        limits = list(max_samples_augmentation)
 
     expected_columns = list(train_ds.column_names)
     expected_set = set(expected_columns)
-    rows: list[dict[str, Any]] = []
-    skipped_non_augmented = 0
-    with path.open("r", encoding="utf-8") as file:
-        for line_number, line in enumerate(file, start=1):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise ValueError(f"Invalid JSON at {path}:{line_number}: {error}") from error
-            if not isinstance(record, dict):
-                raise ValueError(f"Expected a JSON object at {path}:{line_number}.")
+    augmentation_row_groups: list[list[dict[str, Any]]] = []
 
-            # This also makes a combined original+augmentation output safe to pass.
-            record_id = str(record.get("id", ""))
-            if not record_id.startswith("aug_"):
-                skipped_non_augmented += 1
-                continue
+    for file_index, (jsonl_path, max_samples) in enumerate(
+        zip(augmentation_jsonl, limits)
+    ):
+        path = Path(jsonl_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Augmentation JSONL was not found: {path}")
 
-            missing = expected_set.difference(record)
-            if missing:
-                raise ValueError(
-                    f"Augmentation at {path}:{line_number} is missing columns: "
-                    f"{sorted(missing)}"
-                )
-            # Drop `id` and any future metadata so Arrow features exactly match AISA.
-            rows.append({column: record[column] for column in expected_columns})
+        rows: list[dict[str, Any]] = []
+        valid_augmentation_rows = 0
+        skipped_non_augmented = 0
+        sampling_rng = random.Random(seed + file_index)
+        with path.open("r", encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        f"Invalid JSON at {path}:{line_number}: {error}"
+                    ) from error
+                if not isinstance(record, dict):
+                    raise ValueError(f"Expected a JSON object at {path}:{line_number}.")
 
-    if not rows:
-        raise ValueError(f"No augmentation rows with id starting 'aug_' found in {path}.")
+                # This also makes combined original+augmentation files safe to pass.
+                record_id = str(record.get("id", ""))
+                if not record_id.startswith(("aug_", "aug_func")):
+                    skipped_non_augmented += 1
+                    continue
 
-    augmentation_ds = Dataset.from_list(rows, features=train_ds.features)
-    augmentation_ds = augmentation_ds.shuffle(seed=seed)
-    if max_samples_augmentation is not None:
-        augmentation_ds = augmentation_ds.select(
-            range(min(max_samples_augmentation, len(augmentation_ds)))
+                missing = expected_set.difference(record)
+                if missing:
+                    raise ValueError(
+                        f"Augmentation at {path}:{line_number} is missing columns: "
+                        f"{sorted(missing)}"
+                    )
+                # Drop `id` and future metadata so Arrow features match AISA exactly.
+                normalized_record = {
+                    column: record[column] for column in expected_columns
+                }
+                valid_augmentation_rows += 1
+
+                # Reservoir sampling keeps memory proportional to this file's limit.
+                if max_samples is None or len(rows) < max_samples:
+                    rows.append(normalized_record)
+                else:
+                    replacement_index = sampling_rng.randrange(valid_augmentation_rows)
+                    if replacement_index < max_samples:
+                        rows[replacement_index] = normalized_record
+
+        if not rows:
+            raise ValueError(
+                f"No augmentation rows with id starting 'aug_' or 'aug_func' "
+                f"found in {path}."
+            )
+
+        random.Random(seed + file_index).shuffle(rows)
+        augmentation_row_groups.append(rows)
+
+        print(
+            f"Argument augmentation rows: {len(rows)} from {path} "
+            f"(limit={max_samples}, {valid_augmentation_rows} valid rows available, "
+            f"{skipped_non_augmented} non-augmentation rows ignored)."
         )
 
+    combined_rows = [row for group in augmentation_row_groups for row in group]
     print(
-        f"Argument augmentation rows: {len(augmentation_ds)} from {path} "
-        f"({skipped_non_augmented} non-augmentation rows ignored)."
+        f"Total argument augmentation rows: {len(combined_rows)} from "
+        f"{len(augmentation_row_groups)} file(s)."
     )
-    return augmentation_ds
+    return combined_rows
+
+
+def apply_fixed_base_argument_policy(base_prompt: str) -> str:
+    """Replace the stale weather default and install one consistent base policy."""
+    if FIXED_BASE_ARGUMENT_POLICY in base_prompt:
+        return base_prompt
+
+    if LEGACY_WEATHER_DEFAULT_INSTRUCTION in base_prompt:
+        return base_prompt.replace(
+            LEGACY_WEATHER_DEFAULT_INSTRUCTION,
+            FIXED_BASE_ARGUMENT_POLICY,
+            1,
+        )
+
+    if DEVELOPER_MARKER not in base_prompt:
+        raise ValueError("Prompt has no developer turn.")
+    return base_prompt.replace(
+        DEVELOPER_MARKER,
+        DEVELOPER_MARKER + FIXED_BASE_ARGUMENT_POLICY + "\n",
+        1,
+    )
 
 
 def split_prompt_target(text: str) -> tuple[str, str]:
     if MODEL_MARKER not in text:
         raise ValueError("The row text does not contain the expected Gemma model-turn marker.")
     before, target = text.rsplit(MODEL_MARKER, 1)
-    return before + MODEL_MARKER, target
+    base_prompt = apply_fixed_base_argument_policy(before + MODEL_MARKER)
+    return base_prompt, target
 
 
 def inject_task_instruction(base_prompt: str, instruction: str) -> str:
@@ -335,6 +542,21 @@ def inject_task_instruction(base_prompt: str, instruction: str) -> str:
         DEVELOPER_MARKER,
         DEVELOPER_MARKER + instruction.strip() + "\n",
         1,
+    )
+
+
+def strip_tool_declarations(base_prompt: str) -> str:
+    """Remove candidate declarations when the argument task already names a tool.
+
+    Arrow's union schema leaves many null/irrelevant parameter names in the
+    original declarations. The argument subtask receives a clean selected-tool
+    schema from ``build_arguments_instruction`` instead.
+    """
+    return re.sub(
+        r"<start_function_declaration>.*?<end_function_declaration>",
+        "",
+        base_prompt,
+        flags=re.DOTALL,
     )
 
 
@@ -451,10 +673,28 @@ def allowed_parameter_properties(
         return {}
     parameters = fn.get("parameters") or {}
     properties = parameters.get("properties") or {}
+    ignored = UNSCORED_ARGUMENTS_BY_TOOL.get(function_name, set())
     return {
-        str(k): (v if isinstance(v, dict) else {})
+        str(k): v
         for k, v in properties.items()
-        if v is not None
+        if (
+            isinstance(v, dict)
+            and any(schema_value is not None for schema_value in v.values())
+            and str(k) not in ignored
+        )
+    }
+
+
+def filter_scored_arguments(
+    arguments: dict[str, Any] | None,
+    function_name: str,
+) -> dict[str, Any]:
+    """Match the official evaluator's empty-value and tool-scoped ignore rules."""
+    ignored = UNSCORED_ARGUMENTS_BY_TOOL.get(function_name, set())
+    return {
+        str(key): value
+        for key, value in (arguments or {}).items()
+        if value is not None and value != "" and str(key) not in ignored
     }
 
 
@@ -496,15 +736,20 @@ def build_arguments_instruction(
     fn = selected_tool_schema(row, function_name) or {}
     description = str(fn.get("description") or "غير متوفر").strip()
     parameters = fn.get("parameters") or {}
-    properties = parameters.get("properties") or {}
-    required = parameters.get("required") or []
+    properties = allowed_parameter_properties(row, function_name)
+    required = [
+        str(name)
+        for name in (parameters.get("required") or [])
+        if str(name) in properties
+    ]
 
     parameter_lines: list[str] = []
     for parameter_name, raw_schema in properties.items():
-        schema = raw_schema if isinstance(raw_schema, dict) else {}
-        parameter_type = schema.get("type", "غير محدد")
-        parameter_description = str(schema.get("description") or "غير متوفر").strip()
-        enum_values = schema.get("enum")
+        parameter_type = raw_schema.get("type", "غير محدد")
+        parameter_description = str(
+            raw_schema.get("description") or "غير متوفر"
+        ).strip()
+        enum_values = raw_schema.get("enum")
 
         line = (
             f'- {parameter_name} | النوع: {parameter_type} | '
@@ -520,6 +765,10 @@ def build_arguments_instruction(
 
     parameters_text = "\n".join(parameter_lines) if parameter_lines else "- لا توجد معاملات معرفة."
     required_text = ", ".join(map(str, required)) if required else "لا توجد"
+    tool_rules = TOOL_ARGUMENT_RULES.get(function_name, ())
+    tool_rules_text = "\n".join(
+        f"- {rule}" for rule in tool_rules
+    ) if tool_rules else "- لا توجد قواعد إضافية خاصة بهذه الدالة."
 
     return (
         "مهمة فرعية للتدريب متعدد المهام: استخرج معاملات الدالة المستهدفة فقط.\n"
@@ -532,14 +781,17 @@ def build_arguments_instruction(
         "1. استخرج فقط القيم المذكورة أو المستنتجة مباشرة من طلب المستخدم.\n"
         "2. استخدم أسماء المعاملات كما تظهر حرفياً في المخطط أعلاه.\n"
         "3. لا تضف أي معامل غير موجود في المخطط، ولا تخترع قيماً مفقودة.\n"
-        "4. حافظ على نوع كل قيمة وفق المخطط.\n"
-        "5. أخرج كائن JSON صالحاً فقط، من دون شرح أو Markdown.\n"
-        "6. إذا لم توجد أي قيمة قابلة للاستخراج فأخرج {}."
+        "4. إذا لم يذكر المستخدم قيمة فاحذف مفتاحها كلياً؛ لا تخرج null أو نصاً فارغاً أو قيمة افتراضية.\n"
+        "5. حافظ على نوع كل قيمة وفق المخطط، وحافظ على المعرّفات وIBAN وأرقام الحسابات كسلاسل حرفية.\n"
+        "6. أخرج كائن JSON صالحاً فقط، من دون شرح أو Markdown.\n"
+        "7. إذا لم توجد أي قيمة قابلة للاستخراج فأخرج {}.\n"
+        "قواعد خاصة بالدالة:\n"
+        f"{tool_rules_text}"
     )
 
 
 def iter_multitask_examples(
-    dataset: Dataset,
+    dataset: Iterable[dict[str, Any]],
     task_repeats: dict[str, int],
     negative_repeat: int,
     task_names: set[str] | None = None,
@@ -549,6 +801,7 @@ def iter_multitask_examples(
         full_target = ensure_end_turn(full_target_raw)
 
         requires_function, function_name, arguments, _ = extract_gold(row)
+        argument_target = filter_scored_arguments(arguments, function_name)
         instructions = granular_instructions(function_name)
         arguments_instruction = build_arguments_instruction(row, function_name)
         negative_multiplier = negative_repeat if not requires_function else 1
@@ -565,10 +818,13 @@ def iter_multitask_examples(
                 ensure_end_turn(function_name),
             ),
             "arguments": (
-                inject_task_instruction(base_prompt, arguments_instruction),
+                inject_task_instruction(
+                    strip_tool_declarations(base_prompt),
+                    arguments_instruction,
+                ),
                 ensure_end_turn(
                     json.dumps(
-                        arguments,
+                        argument_target,
                         ensure_ascii=False,
                         separators=(",", ":"),
                         sort_keys=True,
@@ -612,7 +868,7 @@ def build_multitask_dataset(
     train_ds: Dataset,
     negative_repeat: int,
     seed: int,
-    argument_augmentation_ds: Dataset | None = None,
+    argument_augmentation_ds: list[dict[str, Any]] | None = None,
 ) -> Dataset:
     mt_ds = Dataset.from_generator(
         iter_multitask_examples,
@@ -732,7 +988,8 @@ def load_base_model(model_id: str, dtype: torch.dtype) -> AutoModelForCausalLM:
 def train_model(
     args: argparse.Namespace,
     train_ds: Dataset,
-    argument_augmentation_ds: Dataset | None = None,
+    eval_ds: Dataset,
+    argument_augmentation_ds: list[dict[str, Any]] | None = None,
 ) -> tuple[torch.nn.Module, AutoTokenizer]:
     if not torch.cuda.is_available():
         raise RuntimeError("Fine-tuning requires a CUDA GPU for this script.")
@@ -777,6 +1034,23 @@ def train_model(
         desc="Tokenizing prompt/target pairs",
     )
 
+    eval_multitask_ds = build_multitask_dataset(
+        train_ds=eval_ds,
+        # Keep the natural dev distribution instead of oversampling negatives.
+        negative_repeat=1,
+        seed=args.seed,
+        argument_augmentation_ds=None,
+    )
+    tokenized_eval_ds = eval_multitask_ds.map(
+        tokenize_supervised_pair,
+        fn_kwargs={
+            "tokenizer": tokenizer,
+            "max_length": args.max_length,
+        },
+        remove_columns=eval_multitask_ds.column_names,
+        desc="Tokenizing dev prompt/target pairs",
+    )
+
     lengths = [len(x) for x in tokenized_ds["input_ids"]]
     print(
         "Token lengths:",
@@ -790,6 +1064,19 @@ def train_model(
 
     bf16 = dtype == torch.bfloat16
     fp16 = dtype == torch.float16
+    world_size = distributed_world_size()
+    effective_batch_size = (
+        args.per_device_train_batch_size
+        * args.gradient_accumulation_steps
+        * world_size
+    )
+    if is_main_process():
+        print(
+            "Effective global batch size:",
+            effective_batch_size,
+            f"({args.per_device_train_batch_size} x {world_size} GPUs "
+            f"x {args.gradient_accumulation_steps} accumulation)",
+        )
 
     training_args = TrainingArguments(
         output_dir=str(output_dir),
@@ -813,6 +1100,10 @@ def train_model(
         dataloader_num_workers=args.dataloader_num_workers,
         seed=args.seed,
         data_seed=args.seed,
+        local_rank=args.local_rank,
+        ddp_backend=args.ddp_backend,
+        ddp_find_unused_parameters=False if world_size > 1 else None,
+        save_on_each_node=False,
     )
 
     collator = DataCollatorForSeq2Seq(
@@ -828,17 +1119,28 @@ def train_model(
         model=model,
         args=training_args,
         train_dataset=tokenized_ds,
+        eval_dataset=tokenized_eval_ds,
         data_collator=collator,
     )
     trainer.train()
+    eval_metrics = trainer.evaluate()
+    trainer.log_metrics("eval", eval_metrics)
+    trainer.save_metrics("eval", eval_metrics)
 
-    trainer.model.save_pretrained(output_dir, safe_serialization=True)
-    tokenizer.save_pretrained(output_dir)
+    # Rank-aware saving prevents concurrent writes from all torchrun workers.
+    trainer.save_model(str(output_dir))
+    trained_model = trainer.accelerator.unwrap_model(trainer.model)
+    if trainer.is_world_process_zero():
+        tokenizer.save_pretrained(output_dir)
 
     metadata = {
         "base_model": args.model_id,
         "dataset": args.dataset_id,
         "dataset_revision": args.dataset_revision,
+        "training_splits": ["train"],
+        "evaluation_split": "dev",
+        "training_source_rows": len(train_ds),
+        "evaluation_source_rows": len(eval_ds),
         "task_repeats": DEFAULT_TASK_REPEATS,
         "negative_repeat": args.negative_repeat,
         "max_length": args.max_length,
@@ -853,20 +1155,45 @@ def train_model(
         "argument_augmentation_rows": (
             len(argument_augmentation_ds) if argument_augmentation_ds is not None else 0
         ),
+        "argument_policy": "aisa_v1.4_official_only",
+        "argument_policy_sources": [
+            "AISA-ArabicFC v1.4 dataset card",
+            "released tool schemas",
+            "official normalize.py OPTIONAL_IGNORE",
+        ],
+        "world_size": world_size,
+        "effective_global_batch_size": effective_batch_size,
+        "ddp_backend": (
+            torch.distributed.get_backend()
+            if torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+            else None
+        ),
+        "unscored_arguments_by_tool": {
+            tool: sorted(fields)
+            for tool, fields in UNSCORED_ARGUMENTS_BY_TOOL.items()
+        },
     }
-    with open(output_dir / "decomposed_training_config.json", "w", encoding="utf-8") as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    if trainer.is_world_process_zero():
+        with open(
+            output_dir / "decomposed_training_config.json",
+            "w",
+            encoding="utf-8",
+        ) as file:
+            json.dump(metadata, file, ensure_ascii=False, indent=2)
 
-    if args.merge_adapter:
+    if args.merge_adapter and trainer.is_world_process_zero():
         merged_dir = output_dir / "merged"
-        merged_model = trainer.model.merge_and_unload()
+        merged_model = trained_model.merge_and_unload()
         merged_model.save_pretrained(merged_dir, safe_serialization=True)
         tokenizer.save_pretrained(merged_dir)
         print(f"Merged model saved to {merged_dir}")
+        trained_model = merged_model
 
+    trainer.accelerator.wait_for_everyone()
     # Restore cache for generation.
-    trainer.model.config.use_cache = True
-    return trainer.model, tokenizer
+    trained_model.config.use_cache = True
+    return trained_model, tokenizer
 
 
 def load_trained_model_for_inference(
@@ -1097,15 +1424,22 @@ def sanitize_arguments(
     function_name: str,
 ) -> dict[str, Any]:
     properties = allowed_parameter_properties(row, function_name)
-    if not isinstance(raw_args, dict):
+    ignored = UNSCORED_ARGUMENTS_BY_TOOL.get(function_name, set())
+    if (
+        function_name == "none"
+        or not isinstance(raw_args, dict)
+        or not properties
+    ):
         return {}
 
     result: dict[str, Any] = {}
     for key, value in raw_args.items():
         key = str(key)
-        if properties and key not in properties:
+        if key in ignored:
             continue
-        if value is None or value == "":
+        if key not in properties:
+            continue
+        if value is None or (isinstance(value, str) and not value.strip()):
             continue
         result[key] = cast_by_schema(key, value, properties.get(key, {}))
     return result
@@ -1171,7 +1505,10 @@ def build_function_name_prompt(row: dict[str, Any]) -> str:
 def build_arguments_prompt(row: dict[str, Any], function_name: str) -> str:
     base_prompt, _ = split_prompt_target(row["text"])
     instruction = build_arguments_instruction(row, function_name)
-    return inject_task_instruction(base_prompt, instruction)
+    return inject_task_instruction(
+        strip_tool_declarations(base_prompt),
+        instruction,
+    )
 
 
 def fallback_think(function_name: str) -> str:
@@ -1184,9 +1521,9 @@ def run_decomposed_inference(
     args: argparse.Namespace,
     model: torch.nn.Module,
     tokenizer: AutoTokenizer,
-    dev_ds: Dataset,
+    inference_ds: Dataset,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    rows = [dev_ds[i] for i in range(len(dev_ds))]
+    rows = [inference_ds[i] for i in range(len(inference_ds))]
 
     # Direct generation supplies the Arabic think trace and fallback full call.
     direct_prompts = [split_prompt_target(row["text"])[0] for row in rows]
@@ -1311,12 +1648,41 @@ def save_jsonl(records: Iterable[dict[str, Any]], path: Path) -> None:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def build_official_gold(dev_ds: Dataset) -> list[dict[str, Any]]:
+def has_complete_ground_truth(dataset: Dataset) -> bool:
+    """Return whether every row has the labels required by the evaluator.
+
+    The released test split retains the train/dev feature schema, so checking
+    column names alone is insufficient: its label columns currently contain
+    null values and its model targets are empty.
+    """
+    required_columns = {"requires_function", "tool_called"}
+    if not required_columns.issubset(dataset.column_names) or len(dataset) == 0:
+        return False
+
+    for row in dataset:
+        requires_function = row.get("requires_function")
+        tool_called = row.get("tool_called")
+        if not isinstance(requires_function, bool):
+            return False
+        if not isinstance(tool_called, str) or not tool_called.strip():
+            return False
+
+        # Positive rows also need their structured call arguments. Requiring a
+        # labeled assistant message avoids treating schema-shaped nulls as gold.
+        if requires_function:
+            assistant = last_assistant_message(row)
+            if not assistant or not (assistant.get("tool_calls") or []):
+                return False
+
+    return True
+
+
+def build_official_gold(dataset: Dataset) -> list[dict[str, Any]]:
     """
     Equivalent to the organizer's published data_loader.load_gold().
     """
     gold: list[dict[str, Any]] = []
-    for index, row in enumerate(dev_ds):
+    for index, row in enumerate(dataset):
         requires_function, function_name, arguments, _ = extract_gold(row)
         gold.append(
             {
@@ -1363,14 +1729,15 @@ def load_official_evaluator() -> Any:
 
 def evaluate_and_save(
     predictions: list[dict[str, Any]],
-    dev_ds: Dataset,
+    dataset: Dataset,
     output_dir: Path,
+    split_name: str,
 ) -> dict[str, Any]:
-    gold = build_official_gold(dev_ds)
+    gold = build_official_gold(dataset)
     evaluate = load_official_evaluator()
     metrics = evaluate(predictions, gold)
 
-    metrics_path = output_dir / "aisa_dev_metrics.json"
+    metrics_path = output_dir / f"aisa_{split_name}_metrics.json"
     with open(metrics_path, "w", encoding="utf-8") as file:
         json.dump(metrics, file, ensure_ascii=False, indent=2)
 
@@ -1385,6 +1752,13 @@ def evaluate_and_save(
 
 def main() -> None:
     args = parse_args()
+    if args.mode in {"train", "all"}:
+        setup_distributed(args)
+    elif int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        # Inference is intentionally run once instead of once per torchrun rank.
+        if int(os.environ.get("RANK", "0")) != 0:
+            return
+
     set_seed(args.seed)
     random.seed(args.seed)
 
@@ -1397,6 +1771,10 @@ def main() -> None:
         argument_augmentation_ds = load_argument_augmentations(
             ds["train"], args.augmentation_jsonl, args.max_samples_augmentation, args.seed
         )
+        print(
+            f"Training on train: {len(ds['train'])} source rows; "
+            f"evaluating on dev: {len(ds['dev'])} source rows."
+        )
 
     model: torch.nn.Module
     tokenizer: AutoTokenizer
@@ -1405,27 +1783,65 @@ def main() -> None:
         model, tokenizer = train_model(
             args,
             ds["train"],
+            ds["dev"],
             argument_augmentation_ds=argument_augmentation_ds,
         )
+        if is_distributed():
+            distributed_barrier()
+            if not is_main_process():
+                shutdown_distributed()
+                return
+            # For --mode all, rank 0 alone continues with generation/evaluation.
+            shutdown_distributed()
     else:
         model, tokenizer = load_trained_model_for_inference(args)
 
     if args.mode in {"infer", "all"}:
+        dev_predictions, dev_debug_rows = run_decomposed_inference(
+            args=args,
+            model=model,
+            tokenizer=tokenizer,
+            inference_ds=ds["dev"],
+        )
+        dev_predictions_path = output_dir / "aisa_dev_predictions.jsonl"
+        dev_debug_path = output_dir / "aisa_dev_debug.jsonl"
+        save_jsonl(dev_predictions, dev_predictions_path)
+        save_jsonl(dev_debug_rows, dev_debug_path)
+        evaluate_and_save(
+            dev_predictions,
+            ds["dev"],
+            output_dir,
+            split_name="dev",
+        )
+        print(f"Dev predictions saved to {dev_predictions_path}")
+        print(f"Dev debug generations saved to {dev_debug_path}")
+
         predictions, debug_rows = run_decomposed_inference(
             args=args,
             model=model,
             tokenizer=tokenizer,
-            dev_ds=ds["dev"],
+            inference_ds=ds["test"],
         )
 
-        submission_path = output_dir / "aisa_dev_submission.jsonl"
-        debug_path = output_dir / "aisa_dev_debug.jsonl"
+        submission_path = output_dir / "aisa_test_submission.jsonl"
+        debug_path = output_dir / "aisa_test_debug.jsonl"
         save_jsonl(predictions, submission_path)
         save_jsonl(debug_rows, debug_path)
 
         print(f"Submission saved to {submission_path}")
         print(f"Debug generations saved to {debug_path}")
-        evaluate_and_save(predictions, ds["dev"], output_dir)
+        if has_complete_ground_truth(ds["test"]):
+            evaluate_and_save(
+                predictions,
+                ds["test"],
+                output_dir,
+                split_name="test",
+            )
+        else:
+            print(
+                "Test ground truth is not available; skipping evaluation "
+                "(requires_function/tool_called/tool-call labels are null or incomplete)."
+            )
 
 
 if __name__ == "__main__":
