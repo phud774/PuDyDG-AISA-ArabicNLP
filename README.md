@@ -1,9 +1,7 @@
 # AISA Arabic Function-Calling Reproduction Package
 
 This repository contains the model artifacts, source code, and outputs needed to reproduce the submitted AISA Arabic function-calling system.
-
-- Complete archive mirror: https://drive.google.com/drive/folders/1DPyOBhHvxUed3n8ObE4Q2PaIaioxY2uL?usp=sharing
-- Base model: https://huggingface.co/TuwaiqAcademy/AISA-AR-FunctionCall-Think
+Base model: https://huggingface.co/TuwaiqAcademy/AISA-AR-FunctionCall-Think
 
 ## Repository contents
 
