@@ -1,6 +1,7 @@
 # AISA Arabic Function-Calling Reproduction Package
 
 > **Important note on reported results.** At submission time, we reran training and inference once to prepare this reproduction package. The metrics and prediction artifacts in `outputs/` therefore differ from the experimental results reported in the paper. The paper reports results obtained during our original experimental runs, whereas the packaged outputs come from the later rerun and are affected by nondeterministic training and differences in the execution environment.
+
 This repository contains the model artifacts, source code, and outputs needed to reproduce the submitted AISA Arabic function-calling system.
 Base model: https://huggingface.co/TuwaiqAcademy/AISA-AR-FunctionCall-Think
 
