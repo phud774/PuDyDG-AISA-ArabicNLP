@@ -17,7 +17,7 @@ from datasets import load_dataset
 from openai import OpenAI
 from tqdm.auto import tqdm
 
-import aisa_decomposed_multitask_toolinfo as aisa
+from arabic_nlp import pipeline as aisa
 
 
 MODEL_ID = "Llama-3.3-70B-Instruct"

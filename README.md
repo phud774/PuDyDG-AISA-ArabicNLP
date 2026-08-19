@@ -7,8 +7,12 @@ Base model: https://huggingface.co/TuwaiqAcademy/AISA-AR-FunctionCall-Think
 
 ## Repository contents
 
-- `aisa_decomposed_multitask_toolinfo.py`: training and inference entry point.
-- `augment_aisa_by_function.py` and `augment_aisa_arguments.py`: optional augmentation generator and helper.
+- `src/arabic_nlp`: installable Python package containing the training, inference,
+  and augmentation modules.
+- `src/arabic_nlp/pipeline.py`: training and inference implementation.
+- `src/arabic_nlp/augmentation`: optional function-centric and argument-centric
+  augmentation generators.
+- `pyproject.toml`: package metadata, dependencies, and command-line entry points.
 - `aisa_function_fewshot_augmentations.jsonl`: exact augmentation data used in the reported training run.
 - `outputs/aisa_decomposed`: final adapter, tokenizer, configuration, original predictions, debug files, and metrics from the initial run.
 - `reproduced`: verification outputs produced on RTX 4090, RTX 3090, and RTX PRO 5000 GPUs.
@@ -25,10 +29,13 @@ source .venv/bin/activate
 pip install -r requirements_aisa.txt
 ```
 
+The editable install exposes both the `arabic_nlp` package and the
+`aisa-arabicfc` command.
+
 For exact reproduction of the submitted files, we recommend an NVIDIA RTX PRO 5000 GPU:
 
 ```bash
-python3 aisa_decomposed_multitask_toolinfo.py \
+python3 -m arabic_nlp \
   --mode infer \
   --checkpoint_dir outputs/aisa_decomposed \
   --output_dir reproduced/aisa_decomposed
@@ -39,7 +46,7 @@ The final test prediction is written to `reproduced/aisa_decomposed/aisa_test_su
 ## Training and inference from scratch
 
 ```bash
-python3 aisa_decomposed_multitask_toolinfo.py \
+python3 -m arabic_nlp \
   --mode all \
   --output_dir outputs/aisa_decomposed \
   --num_train_epochs 1 \
@@ -70,10 +77,13 @@ OPENAI_MODEL=Llama-3.3-70B-Instruct
 Then run:
 
 ```bash
-python3 augment_aisa_by_function.py \
+python3 -m arabic_nlp.augmentation.by_function \
   --output generated/aisa_function_fewshot_augmentations.jsonl \
   --num-samples 1500
 ```
+
+Equivalent installed commands are `aisa-arabicfc`,
+`aisa-augment-by-function`, and `aisa-augment-arguments`.
 
 Regeneration is stochastic and is not expected to reproduce the supplied augmentation file exactly. The current sanitizer may also reject more candidates than the earlier version used to generate the supplied file.
 

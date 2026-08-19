@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aisa-arabic-nlp"
+version = "0.1.0"
+description = "Training, inference, and data augmentation for AISA Arabic function calling"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate>=1.5.0",
+    "datasets>=3.5.0",
+    "huggingface-hub>=0.34.0",
+    "peft>=0.17.0",
+    "safetensors",
+    "sentencepiece",
+    "torch",
+    "tqdm",
+    "transformers>=4.57,<5",
+]
+
+[project.optional-dependencies]
+augmentation = ["openai>=1.0.0"]
+
+[project.scripts]
+aisa-arabicfc = "arabic_nlp.pipeline:main"
+aisa-augment-arguments = "arabic_nlp.augmentation.arguments:main"
+aisa-augment-by-function = "arabic_nlp.augmentation.by_function:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

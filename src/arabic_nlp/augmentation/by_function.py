@@ -19,8 +19,8 @@ from datasets import load_dataset
 from openai import OpenAI
 from tqdm.auto import tqdm
 
-import aisa_decomposed_multitask_toolinfo as aisa
-import augment_aisa_arguments as common
+from arabic_nlp import pipeline as aisa
+from arabic_nlp.augmentation import arguments as common
 
 
 @dataclass(frozen=True)

@@ -30,7 +30,7 @@ Default inference is hybrid/decomposed:
 Example:
     pip install -U transformers datasets peft accelerate huggingface_hub sentencepiece
 
-    python aisa_decomposed_multitask_toolinfo.py \
+    python -m arabic_nlp \
         --mode all \
         --output_dir outputs/aisa_decomposed \
         --num_train_epochs 1 \
@@ -38,7 +38,7 @@ Example:
         --gradient_accumulation_steps 8
 
 Inference only from a saved PEFT adapter:
-    python aisa_decomposed_multitask_toolinfo.py \
+    python -m arabic_nlp \
         --mode infer \
         --checkpoint_dir outputs/aisa_decomposed \
         --output_dir outputs/aisa_decomposed
